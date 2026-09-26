@@ -1,0 +1,37 @@
+# Manual project-local Codex configuration template.
+# Copy this file to `<repo>/.codex/config.toml`. Copy `../agents/*.toml`
+# into `<repo>/agents/`, or adjust the paths below if you install them elsewhere.
+# `config_file` paths are resolved relative to this config file.
+# Agent templates omit model and reasoning fields so they inherit the active runtime.
+
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 2
+
+[agents.music_planner]
+config_file = "../agents/music-planner.toml"
+
+[agents.music_executor]
+config_file = "../agents/music-executor.toml"
+
+# Use a Node.js installation available on PATH. Replace the explicit placeholders
+# below with absolute paths on the installing machine before enabling these servers.
+[mcp_servers.synthv-agent-bridge]
+command = "node"
+args = ["/YOUR_REPO_ROOT/tools/synthv-agent-bridge/dist/src/cli.js"]
+cwd = "/YOUR_REPO_ROOT/tools/synthv-agent-bridge"
+startup_timeout_sec = 120
+env = { SYNTHV_AGENT_BRIDGE_DIR = "/YOUR_TEMP_DIR/synthv-agent-bridge" }
+
+# `python3` must have the REAPER MCP package dependencies installed.
+# The workspace path remains an explicit placeholder; do not copy a developer's path.
+[mcp_servers.reaper]
+command = "python3"
+args = ["-m", "reaper_mcp.main"]
+cwd = "/YOUR_REPO_ROOT/tools/reaper-mcp"
+startup_timeout_sec = 120
+tool_timeout_sec = 600
+env = { TMPDIR = "/YOUR_TEMP_DIR" }

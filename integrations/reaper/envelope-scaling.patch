@@ -1,0 +1,160 @@
+diff --git a/reaper_mcp/tools/envelope_tools.py b/reaper_mcp/tools/envelope_tools.py
+index 90c1928..626104a 100644
+--- a/reaper_mcp/tools/envelope_tools.py
++++ b/reaper_mcp/tools/envelope_tools.py
+@@ -66,6 +66,7 @@ def register(mcp: FastMCP):
+         fx_index: int = -1,
+         param_index: int = -1,
+         max_results: int = 2000,
++        value_mode: str = "",
+     ) -> dict:
+         """Read automation points from a track or FX parameter envelope.
+ 
+@@ -75,6 +76,12 @@ def register(mcp: FastMCP):
+         For FX param envelopes: pass `fx_index` and `param_index` (get these
+         from `fx_get_params`). `envelope_name` is ignored when FX param is set.
+ 
++        Volume values default to linear gain (1.0 = 0 dB), regardless of
++        REAPER's fader scaling. Each point also includes raw_value, and the
++        result includes scaling_mode/value_mode. Use value_mode="raw" only
++        when explicitly working with native envelope coordinates. Other
++        envelope types keep their native units.
++
+         Args:
+             track_index: Track.
+             envelope_name: Named track envelope (ignored if fx_index+param_index set).
+@@ -93,6 +100,10 @@ def register(mcp: FastMCP):
+             )
+         params = {"track_index": track_index, "envelope_name": envelope_name,
+                   "max_results": max_results}
++        if value_mode not in ("", "linear", "raw"):
++            raise ReaperMCPError(ErrorCode.INVALID_PARAMETER, "value_mode must be empty, linear or raw")
++        if value_mode:
++            params["value_mode"] = value_mode
+         if fx_index >= 0 and param_index >= 0:
+             params["fx_index"] = fx_index
+             params["param_index"] = param_index
+@@ -106,6 +117,7 @@ def register(mcp: FastMCP):
+         fx_index: int = -1,
+         param_index: int = -1,
+         create: bool = True,
++        value_mode: str = "",
+     ) -> dict:
+         """Batch-insert automation points into an envelope.
+ 
+@@ -115,6 +127,8 @@ def register(mcp: FastMCP):
+         Value units:
+           - Volume track env: linear gain where 1.0 = unity (0 dB), 2.0 ≈ +6 dB,
+                               0.5 ≈ -6 dB. Use 10**(db/20) to convert from dB.
++                              Lua converts this to the actual envelope scaling.
++                              value_mode="raw" explicitly bypasses conversion.
+           - Pan: -1.0 (hard left) to +1.0 (hard right).
+           - Mute: 0.0 or 1.0.
+           - FX params: 0.0-1.0 normalized (same as setup_fx_chain's params/params_by_index).
+@@ -144,7 +158,10 @@ def register(mcp: FastMCP):
+                     ErrorCode.INVALID_PARAMETER,
+                     f"point[{i}] must be object with 'time' and 'value' keys",
+                 )
+-            _validate_envelope_value(pt["value"], envelope_name, is_fx_param, i)
++            if value_mode != "raw":
++                _validate_envelope_value(pt["value"], envelope_name, is_fx_param, i)
++        if value_mode not in ("", "linear", "raw"):
++            raise ReaperMCPError(ErrorCode.INVALID_PARAMETER, "value_mode must be empty, linear or raw")
+         payload = {
+             "track_index": track_index,
+             "envelope_name": envelope_name,
+@@ -154,6 +171,8 @@ def register(mcp: FastMCP):
+         if fx_index >= 0 and param_index >= 0:
+             payload["fx_index"] = fx_index
+             payload["param_index"] = param_index
++        if value_mode:
++            payload["value_mode"] = value_mode
+         return await client.execute("envelope_add_points", **payload)
+ 
+     @mcp.tool()
+diff --git a/reaper_scripts/reaper_mcp_server.lua b/reaper_scripts/reaper_mcp_server.lua
+index b5f2e3f..f524dee 100644
+--- a/reaper_scripts/reaper_mcp_server.lua
++++ b/reaper_scripts/reaper_mcp_server.lua
+@@ -5102,14 +5102,23 @@ end
+ function envelope.envelope_get_points(p)
+   local env, err = _resolve_envelope(p)
+   if not env then return nil, err end
++  local is_volume = p.fx_index == nil and
++    ((p.envelope_name or "Volume") == "Volume" or p.envelope_name == "Volume (Pre-FX)")
++  local scaling_mode = reaper.GetEnvelopeScalingMode(env)
++  local value_mode = p.value_mode or (is_volume and "linear" or "raw")
++  if value_mode ~= "linear" and value_mode ~= "raw" then return nil, "value_mode must be linear or raw" end
++  if value_mode == "linear" and not is_volume then return nil, "linear value_mode is only supported for Volume envelopes" end
+   local count = reaper.CountEnvelopePoints(env)
+   local points = {}
+   local max_pts = p.max_results or 2000
+   local returned = math.min(count, math.floor(max_pts))
+   for i = 0, returned - 1 do
+     local _, time, value, shape, tension, selected = reaper.GetEnvelopePoint(env, i)
++    local raw_value = value
++    if value_mode == "linear" then value = reaper.ScaleFromEnvelopeMode(scaling_mode, value) end
+     points[#points+1] = {
+       index = i, time = time, value = value,
++      raw_value = raw_value,
+       shape = shape, tension = tension, selected = selected,
+     }
+   end
+@@ -5117,6 +5126,8 @@ function envelope.envelope_get_points(p)
+     total_points = count,
+     returned = returned,
+     truncated = count > returned,
++    scaling_mode = scaling_mode,
++    value_mode = value_mode,
+     points = points,
+   }
+ end
+@@ -5124,25 +5135,46 @@ end
+ function envelope.envelope_add_points(p)
+   local env, err = _resolve_envelope(p)
+   if not env then return nil, err end
++  local is_volume = p.fx_index == nil and
++    ((p.envelope_name or "Volume") == "Volume" or p.envelope_name == "Volume (Pre-FX)")
++  local scaling_mode = reaper.GetEnvelopeScalingMode(env)
++  local value_mode = p.value_mode or (is_volume and "linear" or "raw")
++  if value_mode ~= "linear" and value_mode ~= "raw" then return nil, "value_mode must be linear or raw" end
++  if value_mode == "linear" and not is_volume then return nil, "linear value_mode is only supported for Volume envelopes" end
+   local pts = p.points
+   if type(pts) == "string" then pts = json_decode(pts) end
+   if type(pts) ~= "table" then return nil, "points must be a JSON array" end
++  -- Validate the whole batch before writing any point. Negative dB numbers
++  -- are not linear amplitudes; reject rather than silently muting the track.
++  for _, pt in ipairs(pts) do
++    if type(pt.time) ~= "number" or type(pt.value) ~= "number" or
++      pt.time ~= pt.time or pt.value ~= pt.value or
++      math.abs(pt.time) == math.huge or math.abs(pt.value) == math.huge then
++      return nil, "Every point needs finite numeric time and value"
++    end
++    if value_mode == "linear" and pt.value < 0 then return nil, "Volume value must be nonnegative linear gain, not dB" end
++  end
+   local added = 0
++  local written_points = {}
+   for _, pt in ipairs(pts) do
+     if type(pt.time) == "number" and type(pt.value) == "number" then
++      local raw_value = pt.value
++      if value_mode == "linear" then raw_value = reaper.ScaleToEnvelopeMode(scaling_mode, pt.value) end
+       reaper.InsertEnvelopePoint(
+-        env, pt.time, pt.value,
++        env, pt.time, raw_value,
+         math.floor(pt.shape or 0),
+         pt.tension or 0,
+         pt.selected and true or false,
+         true  -- no sort (we sort at end)
+       )
+       added = added + 1
++      written_points[#written_points+1] = {time = pt.time, value = pt.value, raw_value = raw_value}
+     end
+   end
+   reaper.Envelope_SortPoints(env)
+   reaper.UpdateArrange()
+-  return {success = true, points_added = added}
++  return {success = true, points_added = added, scaling_mode = scaling_mode,
++    value_mode = value_mode, written_points = written_points}
+ end
+ 
+ function envelope.envelope_clear_range(p)

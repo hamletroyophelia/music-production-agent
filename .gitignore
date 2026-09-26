@@ -1,0 +1,45 @@
+# Local configuration and credentials
+.codex/
+.env
+.env.*
+!.env.example
+*.local.toml
+*.local.json
+credentials*
+auth.json
+*.pem
+*.key
+# DAW projects, copyrighted source material and generated audio
+music-runs/
+runs/
+inputs/
+outputs/
+projects/
+*.wav
+*.mp3
+*.flac
+*.aiff
+*.ogg
+*.m4a
+*.mid
+*.midi
+*.lrc
+*.svp
+*.rpp
+*.rpp-bak
+*.flp
+*.reapeaks
+# Caches, dependencies, logs and private inventories
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+dist/
+*.log
+.DS_Store
+backups/
+staging/
+local-inventory/
+
+# Separately installed bridge checkouts
+tools/
